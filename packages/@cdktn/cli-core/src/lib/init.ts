@@ -48,6 +48,30 @@ export type InitArgs = {
 
 export const templatesDir = path.join(__dirname, "..", "..", "templates");
 
+const DEFAULT_TEMPLATE_VARIABLES: Record<string, string> = {
+  packageManager: "npm",
+  pmRun: "npm run",
+  pmAdd: "npm install",
+  pmExec: "npx",
+};
+
+// Templates consuming the template variables. A variant directory carries only the files the base lacks and has no
+// hooks of its own; the base hook copies them in before it installs dependencies.
+const TEMPLATE_VARIANTS: Record<
+  string,
+  { base: string; variables: Record<string, string> }
+> = {
+  "typescript-pnpm": {
+    base: "typescript",
+    variables: {
+      packageManager: "pnpm",
+      pmRun: "pnpm run",
+      pmAdd: "pnpm add",
+      pmExec: "pnpm exec",
+    },
+  },
+};
+
 const availableTemplates = fs
   .readdirSync(templatesDir)
   .filter((x) => !x.startsWith("."));
@@ -68,24 +92,36 @@ export async function init({
   providersForceLocal,
   silent,
 }: InitArgs) {
-  const deps: any = await determineDeps(
-    cdktfVersion,
-    dist,
-    path.basename(templatePath),
-  );
+  // A remote template name should not collide with a template shipped with the CLI
+  const builtInName =
+    path.dirname(path.resolve(templatePath)) === path.resolve(templatesDir)
+      ? path.basename(templatePath)
+      : undefined;
+  const variant = builtInName ? TEMPLATE_VARIANTS[builtInName] : undefined;
+
+  const deps: any = await determineDeps(cdktfVersion, dist, builtInName);
 
   const futureFlags = Object.entries(FUTURE_FLAGS)
     .map(([key, value]) => `    "${key}": "${value}"`)
     .join(`,\n`);
 
-  await sscaff(templatePath, destination, {
+  const variables = {
+    ...DEFAULT_TEMPLATE_VARIABLES,
+    ...variant?.variables,
+    ...(variant ? { variant: builtInName } : {}),
     ...deps,
     ...projectInfo,
     futureFlags,
     projectId,
     sendCrashReports,
     silent,
-  });
+  };
+
+  await sscaff(
+    variant ? path.join(templatesDir, variant.base) : templatePath,
+    destination,
+    variables,
+  );
   const cdktfConfig = CdktfConfig.read(destination);
 
   let needsGet = false;
@@ -94,6 +130,7 @@ export async function init({
       providers: providers,
       language: cdktfConfig.language,
       projectDirectory: destination,
+      cdktfVersion,
       forceLocal: providersForceLocal,
       dist,
     });
@@ -157,10 +194,13 @@ export async function determineDeps(
 
     // If we know the template, only validate its artifact; otherwise fall
     // back to validating everything (preserves prior behavior for unknown /
-    // remote templates).
+    // remote templates). Variants share their base's artifact.
+    const distTemplate = template
+      ? (TEMPLATE_VARIANTS[template]?.base ?? template)
+      : template;
     const keysToValidate: DistKey[] =
-      template && distKeysByTemplate[template]
-        ? distKeysByTemplate[template]
+      distTemplate && distKeysByTemplate[distTemplate]
+        ? distKeysByTemplate[distTemplate]
         : (Object.keys(ret) as DistKey[]);
 
     for (const key of keysToValidate) {
