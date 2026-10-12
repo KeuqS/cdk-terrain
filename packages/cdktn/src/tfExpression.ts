@@ -127,6 +127,7 @@ class TFExpression extends Intrinsic implements IResolvable {
   protected escapeString(str: string) {
     return str
       .replace(/\n/g, "\\n") // escape newlines
+      .replace(/"/g, '\\"') // escape quotes in HCL string literals
       .replace(/\${/g, "$$${"); // escape ${ to $${
   }
 
@@ -201,7 +202,7 @@ class RawString extends TFExpression {
 
   public resolve(context: IResolveContext) {
     const qts = context.suppressBraces ? `"` : ``;
-    return `${qts}${this.escapeString(this.str).replace(/\"/g, '\\"')}${qts}`; // eslint-disable-line no-useless-escape
+    return `${qts}${this.escapeString(this.str)}${qts}`;
   }
 
   public toString() {

@@ -182,6 +182,11 @@ test("functions escape string markers", () => {
   ).toMatchInlineSnapshot(`"\${length("\\"")}"`);
 });
 
+test("string literals escape quotes for HCL", () => {
+  const rendered = resolveExpression(call("length", ['{"key":"value"}']));
+  expect(rendered).toBe('${length("{\\"key\\":\\"value\\"}")}');
+});
+
 test("functions escape object keys", () => {
   expect(
     resolveExpression(
