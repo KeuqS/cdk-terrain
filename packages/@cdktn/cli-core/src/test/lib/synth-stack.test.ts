@@ -4,13 +4,62 @@ import * as fs from "fs-extra";
 import * as os from "os";
 import * as path from "path";
 import { Errors } from "@cdktn/commons";
-import { SynthStack } from "../../lib/synth-stack";
+import { SynthStack, SynthesizedStack } from "../../lib/synth-stack";
 
 jest.mock("@cdktn/commons", () => ({
   ...jest.requireActual("@cdktn/commons"),
   sendTelemetry: jest.fn().mockResolvedValue(undefined),
   flushTelemetry: jest.fn().mockResolvedValue(undefined),
 }));
+
+function stack(content: string): SynthesizedStack {
+  return {
+    name: "stack",
+    dependencies: [],
+    annotations: [],
+    content,
+    constructPath: ".",
+    synthesizedStackPath: ".",
+    workingDirectory: ".",
+    stackMetadataPath: ".",
+  };
+}
+
+describe("SynthStack.telemetryPayload", () => {
+  // not the privacy boundary: the payload still carries the stack name and
+  // the ids inside imports/moved; sendStackTelemetry reduces it to counts
+  it("extracts the metadata block and required providers per stack", () => {
+    const metadata = {
+      version: "0.21.0",
+      stackName: "prod-vpc",
+      backend: "local",
+    };
+    const requiredProviders = { aws: { source: "aws", version: "~> 5.0" } };
+    const payload = SynthStack.telemetryPayload([
+      stack(
+        JSON.stringify({
+          "//": { metadata, outputs: {} },
+          terraform: { required_providers: requiredProviders },
+          resource: { aws_s3_bucket: { bucket: { bucket: "name" } } },
+        }),
+      ),
+      // HCL output: the content is the metadata file, without a terraform block
+      stack(JSON.stringify({ "//": { metadata, outputs: {} } })),
+    ]);
+
+    expect(payload).toEqual({
+      stackMetadata: [metadata, metadata],
+      requiredProviders: [requiredProviders, {}],
+    });
+  });
+
+  it("yields empty entries for content without metadata", () => {
+    expect(SynthStack.telemetryPayload([stack("{}")])).toEqual({
+      stackMetadata: [{}],
+      requiredProviders: [{}],
+    });
+  });
+});
 
 describe("SynthStack.synth failure paths count the run before exiting", () => {
   const commons = jest.requireMock("@cdktn/commons") as {

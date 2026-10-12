@@ -13,6 +13,7 @@ import {
 import { performance } from "perf_hooks";
 import {
   Errors,
+  SynthOrigin,
   commandErrorType,
   flushTelemetry,
   logger,
@@ -75,8 +76,6 @@ interface ManifestJson {
   version: string;
   stacks: StackManifest[];
 }
-
-export type SynthOrigin = "watch";
 
 export class SynthStack {
   public static async synth(
@@ -280,6 +279,21 @@ Command output on stdout:
     return stacks;
   }
 
+  // Per stack, only the metadata block and `required_providers`: resource
+  // config and outputs never enter the payload.
+  public static telemetryPayload(stacks: SynthesizedStack[]): {
+    stackMetadata: unknown[];
+    requiredProviders: unknown[];
+  } {
+    const contents = stacks.map((stack) => JSON.parse(stack.content));
+    return {
+      stackMetadata: contents.map((c) => c?.["//"]?.metadata ?? {}),
+      requiredProviders: contents.map(
+        (c) => c?.terraform?.required_providers ?? {},
+      ),
+    };
+  }
+
   public static async synthTelemetry(
     totalTime: number,
     stacks: SynthesizedStack[],
@@ -291,13 +305,7 @@ Command output on stdout:
       totalTime: totalTime,
       language: config.language,
       synthOrigin,
-      stackMetadata: stacks.map(
-        (stack) => JSON.parse(stack.content)["//"].metadata,
-      ),
-      requiredProviders: stacks.map(
-        (stack: any) =>
-          JSON.parse(stack.content)["terraform"].required_providers,
-      ),
+      ...SynthStack.telemetryPayload(stacks),
     });
   }
 
