@@ -36,6 +36,8 @@ import {
   Errors,
   isUsageTelemetryEnabled,
   resetCommandTelemetry,
+  seedTerraformCliProbeForTests,
+  setProjectTargetAttributes,
   setUsageTelemetryEnabled,
 } from "@cdktn/commons";
 import {
@@ -86,12 +88,16 @@ function useReportingFixture() {
     delete process.env.CHECKPOINT_DISABLE;
     process.env.SENTRY_DSN = "https://public@example.invalid/1";
     ciInfoMock.isCI = false;
+    // the start-of-command metric stamps the binary; keep it off the machine
+    seedTerraformCliProbeForTests(Promise.resolve("Terraform v1.9.0\n"));
   });
 
   afterEach(() => {
     setUsageTelemetryEnabled(undefined);
     resetCommandTelemetry();
     Errors.setScope("unknown");
+    setProjectTargetAttributes(undefined);
+    seedTerraformCliProbeForTests();
     process.chdir(originalCwd);
     fs.removeSync(workdir);
     Object.defineProperty(process.stdout, "isTTY", {
@@ -531,12 +537,13 @@ describe("start-of-command metric (initializErrorReporting)", () => {
     );
   });
 
-  it("reads the language from the explicit project path", async () => {
+  it("reads the language and the declared targets from the explicit project path", async () => {
     const destination = path.join(workdir, "new-project");
     fs.mkdirpSync(destination);
     fs.writeJsonSync(path.join(destination, "cdktf.json"), {
       language: "go",
       sendCrashReports: false,
+      targetVersions: { terraform: ">=1.9.0" },
     });
     setInteractive(false);
     Errors.setScope("init");
@@ -548,6 +555,7 @@ describe("start-of-command metric (initializErrorReporting)", () => {
         attributes: expect.objectContaining({
           command: "init",
           language: "go",
+          target_terraform: ">=1.9.0",
         }),
       }),
     );

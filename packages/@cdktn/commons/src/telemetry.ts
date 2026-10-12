@@ -4,10 +4,14 @@ import { normalizeConsentFlag } from "./config";
 import * as Sentry from "@sentry/node";
 import * as path from "path";
 import * as fs from "fs-extra";
+import * as semver from "semver";
 import ciInfo from "ci-info";
 import { logger } from "./logging";
-import { LANGUAGES } from "./config";
+import { DEFAULT_TARGET_VERSIONS, Language, LANGUAGES } from "./config";
+import { isGradleProject } from "./gradle";
+import { detectNodePackageManager } from "./node-package-manager";
 import { processState } from "./process-state";
+import { terraformCli } from "./terraform";
 
 type AttributeValue = string | number | boolean;
 type Attributes = Record<string, AttributeValue>;
@@ -58,6 +62,10 @@ type CommandTelemetryState = {
   // The raw `language` of the project the run started in, so every metric of
   // the run (the error metric has no payload) carries the one `invoked` did.
   language?: unknown;
+  // detected in the project the run started in, for the same reason
+  packageManager?: PackageManager;
+  // captured with the consent decision, for the same reason
+  projectTargetAttributes?: Attributes;
 };
 
 // Shared by both bundle copies: the handlers' copy captures the decision and
@@ -66,6 +74,76 @@ const state = processState<CommandTelemetryState>(
   "cdktn.commandTelemetry",
   () => ({}),
 );
+
+export const PACKAGE_MANAGERS = [
+  "npm",
+  "pnpm",
+  "yarn",
+  "yarn-berry",
+  "pip",
+  "pipenv",
+  "maven",
+  "gradle",
+  "nuget",
+  "go",
+] as const;
+export type PackageManager = (typeof PACKAGE_MANAGERS)[number];
+
+// Only members of the closed set become an attribute: a `packageManager`
+// field carries a version and a hash, and a detector may grow new values.
+export function normalizePackageManager(
+  value: unknown,
+): PackageManager | undefined {
+  return PACKAGE_MANAGERS.find((name) => name === value);
+}
+
+// The package manager `provider add` would drive, decided the way cli-core's
+// PackageManager.forLanguage does. undefined outside a supported project.
+function detectPackageManager(
+  projectPath: string,
+  cdktfJson: Record<string, any>,
+): PackageManager | undefined {
+  try {
+    switch (cdktfJson.language) {
+      case Language.TYPESCRIPT:
+        return normalizePackageManager(detectNodePackageManager(projectPath));
+      case Language.PYTHON:
+        if (typeof cdktfJson.app !== "string") {
+          return undefined;
+        }
+        return cdktfJson.app.includes("pipenv") ? "pipenv" : "pip";
+      case Language.JAVA:
+        return isGradleProject(projectPath) ? "gradle" : "maven";
+      case Language.CSHARP:
+        return "nuget";
+      case Language.GO:
+        return "go";
+      default:
+        return undefined;
+    }
+  } catch (err) {
+    logger.debug(`Could not detect the package manager: ${err}`);
+    return undefined;
+  }
+}
+
+// Free-text payload fields are validated before they become attributes so a
+// misconfigured or hand-edited value never carries arbitrary text.
+const RELEASE_VERSION = /^\d+\.\d+\.\d+/;
+
+// MAJOR.MINOR.PATCH only: prerelease and build identifiers are free text
+// (a wrapper's version line or a locally built library can carry anything).
+function releaseVersion(value: string | undefined): string | undefined {
+  return RELEASE_VERSION.exec(value ?? "")?.[0];
+}
+
+// Normalized so spacing variants collapse into one value. Hyphen ranges are
+// written " - ", so a hyphen right after a digit is always a prerelease:
+// free text (see releaseVersion), which rejects the range.
+function semverRangeOrInvalid(value: string): string {
+  const range = value.length <= 64 ? semver.validRange(value) : null;
+  return range && !/\d[-+]/.test(value) ? range : "invalid";
+}
 
 export function setUsageTelemetryEnabled(enabled: boolean | undefined): void {
   state.usageTelemetryEnabled = enabled;
@@ -87,6 +165,53 @@ export function isUsageTelemetryEnabled(projectPath = process.cwd()): boolean {
     return state.usageTelemetryEnabled;
   }
   return getUsageTelemetryConsent(projectPath) !== false;
+}
+
+// Falls back to the CLI defaults, so every metric carries the ranges the
+// command validated against.
+export function getProjectTargetAttributes(
+  projectPath = process.cwd(),
+): Attributes {
+  const cdktfJson = readRawCdktfJson(projectPath);
+  const declared =
+    cdktfJson.targetVersions &&
+    typeof cdktfJson.targetVersions === "object" &&
+    !Array.isArray(cdktfJson.targetVersions)
+      ? cdktfJson.targetVersions
+      : undefined;
+  const targets: Record<string, unknown> = declared ?? DEFAULT_TARGET_VERSIONS;
+  const attributes: Attributes = {
+    targets_declared: declared !== undefined,
+    validate_installed_binary: cdktfJson.validateInstalledBinary === true,
+  };
+  if (typeof targets.terraform === "string") {
+    attributes.target_terraform = semverRangeOrInvalid(targets.terraform);
+  }
+  if (typeof targets.opentofu === "string") {
+    attributes.target_opentofu = semverRangeOrInvalid(targets.opentofu);
+  }
+  return attributes;
+}
+
+export function setProjectTargetAttributes(
+  attributes: Attributes | undefined,
+): void {
+  state.projectTargetAttributes = attributes;
+}
+
+async function getBinaryAttributes(): Promise<Attributes> {
+  const cli = await terraformCli();
+  const attributes: Attributes = { binary: cli.name };
+  // an unrecognised product's version is the first version-like token of
+  // its output, which can be anything (a wrapper's "connected to 10.0.0.1")
+  const release =
+    cli.name === "terraform" || cli.name === "opentofu"
+      ? releaseVersion(cli.version)
+      : undefined;
+  if (release) {
+    attributes.binary_version = release;
+  }
+  return attributes;
 }
 
 // By type and command only: message and context can carry paths and user
@@ -112,14 +237,24 @@ export async function flushTelemetry(timeoutMs = 4000): Promise<void> {
   }
 }
 
-function commandAttributes(command: string, language: unknown): Attributes {
+async function commandAttributes(
+  command: string,
+  language: unknown,
+): Promise<Attributes> {
   const ci: string | false = ciInfo.isCI ? ciInfo.name || "unknown" : false;
   const attributes: Attributes = {
     command,
     ci: ci === false ? false : ci,
+    os: process.platform,
+    arch: process.arch,
+    ...(state.projectTargetAttributes ?? getProjectTargetAttributes()),
+    ...(await getBinaryAttributes()),
   };
   if (LANGUAGES.includes(language as any)) {
     attributes.language = language as string;
+  }
+  if (state.packageManager !== undefined) {
+    attributes.package_manager = state.packageManager;
   }
   return attributes;
 }
@@ -134,12 +269,14 @@ export async function startCommandTelemetry(
     return;
   }
   state.startedCommand = command;
-  state.language = readRawCdktfJson(projectPath).language;
+  const cdktfJson = readRawCdktfJson(projectPath);
+  state.language = cdktfJson.language;
+  state.packageManager = detectPackageManager(projectPath, cdktfJson);
   try {
     if (!isUsageTelemetryEnabled()) {
       return;
     }
-    const attributes = commandAttributes(command, state.language);
+    const attributes = await commandAttributes(command, state.language);
     Sentry.metrics.count("cli.command.invoked", 1, { attributes });
   } catch (err) {
     logger.debug(`Could not send telemetry data: ${err}`);
@@ -150,6 +287,7 @@ export async function startCommandTelemetry(
 export function resetCommandTelemetry(): void {
   state.startedCommand = undefined;
   state.language = undefined;
+  state.packageManager = undefined;
 }
 
 // Payload fields reach the attributes only through the allow-lists above.
@@ -164,7 +302,7 @@ export async function sendTelemetry(
       return;
     }
 
-    const attributes = commandAttributes(
+    const attributes = await commandAttributes(
       command,
       payload.language ?? state.language,
     );
