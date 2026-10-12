@@ -2,11 +2,16 @@
 // SPDX-License-Identifier: MPL-2.0
 import * as yargs from "yargs";
 import * as Sentry from "@sentry/node";
-import { IsErrorType, collectDebugInformation } from "@cdktn/commons";
+import {
+  Errors,
+  IsErrorType,
+  collectDebugInformation,
+  commandErrorType,
+  flushTelemetry,
+  sendTelemetry,
+} from "@cdktn/commons";
 
 type CliFailure = { message?: string | null; error?: unknown };
-
-const SENTRY_FLUSH_TIMEOUT_MS = 4000;
 
 // yargs' hard-coded flag for a shell completion request (`cdktn diff <TAB>`
 // runs `cdktn --get-yargs-completions cdktn diff ""`); its parsed value is
@@ -68,11 +73,15 @@ async function reportFailure({ message, error }: CliFailure): Promise<number> {
     console.error(`Error while reporting failure: ${describeError(e).message}`);
   }
 
-  try {
-    await Sentry.flush(SENTRY_FLUSH_TIMEOUT_MS);
-  } catch {
-    /* never mask the original error */
-  }
+  // The one place a failure that reaches the entrypoint is counted; synth
+  // failures that exit inside cli-core count themselves and never get here.
+  // A yargs validation failure carries a message but no error.
+  await sendTelemetry(Errors.getScope(), {
+    error: true,
+    errorType:
+      error === undefined || error === null ? "Usage" : commandErrorType(error),
+  });
+  await flushTelemetry();
   return 1;
 }
 
@@ -131,11 +140,7 @@ export function runCli(y: yargs.Argv): Promise<void> {
       // success / --help / --version: Sentry buffers asynchronously, so flush
       // (bounded) and exit explicitly, or an unresponsive ingest endpoint
       // keeps the transport socket and the process alive.
-      try {
-        await Sentry.flush(SENTRY_FLUSH_TIMEOUT_MS);
-      } catch {
-        /* never block the exit */
-      }
+      await flushTelemetry();
       await drainStdio();
       process.exit(process.exitCode ?? 0);
     }

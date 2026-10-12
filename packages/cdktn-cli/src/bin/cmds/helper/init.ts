@@ -16,6 +16,7 @@ import {
   Project,
   CdktfConfig,
   getAllPrebuiltProviders,
+  initializErrorReporting,
 } from "@cdktn/cli-core";
 import {
   convertProject,
@@ -34,7 +35,6 @@ import {
   logFileName,
   logger,
   Errors,
-  sendTelemetry,
   ConstructsMakerProviderTarget,
   detectNodePackageManager,
   nodePackageManagerCommand,
@@ -44,7 +44,10 @@ import ciDetect from "@npmcli/ci-detect";
 import { isInteractiveTerminal } from "./check-environment";
 import { getTerraformVersion } from "./terraform-check";
 import * as semver from "semver";
-import { askForCrashReportingConsent } from "./error-reporting";
+import {
+  askForCrashReportingConsent,
+  askForUsageTelemetryConsent,
+} from "./error-reporting";
 
 const chalkColour = new chalk.Instance();
 
@@ -84,6 +87,7 @@ type Options = {
   destination: string;
   fromTerraformProject?: string;
   enableCrashReporting?: boolean;
+  enableUsageTelemetry?: boolean;
   tfeHostname?: string;
   silent?: boolean;
   nonInteractive?: boolean;
@@ -147,7 +151,6 @@ This means that your Terraform state file will be stored locally on disk in a fi
     argv.projectDescription,
   );
   const projectId = randomUUID();
-  telemetryData.projectId = projectId;
 
   let fromTerraformProject = argv.fromTerraformProject || undefined;
   if (!fromTerraformProject) {
@@ -179,9 +182,13 @@ This means that your Terraform state file will be stored locally on disk in a fi
   }
 
   const ci: string | false = ciDetect();
+  const interactive = !ci && !argv.nonInteractive && isInteractiveTerminal();
   const sendCrashReports =
     argv.enableCrashReporting ??
-    (ci ? false : await askForCrashReportingConsent());
+    (interactive ? await askForCrashReportingConsent() : false);
+  const sendUsageTelemetry =
+    argv.enableUsageTelemetry ??
+    (interactive ? await askForUsageTelemetryConsent() : true);
   const providers =
     argv.providers?.length || argv.nonInteractive
       ? argv.providers
@@ -232,13 +239,14 @@ This means that your Terraform state file will be stored locally on disk in a fi
     projectInfo,
     templatePath: templateInfo.Path,
     sendCrashReports: sendCrashReports,
+    sendUsageTelemetry: sendUsageTelemetry,
     providers,
     providersForceLocal: argv.providersForceLocal,
     silent: argv.silent,
   });
 
   if (convertResult && importPath) {
-    const { code, cdktfJson, stats } = convertResult;
+    const { code, cdktfJson } = convertResult;
 
     const mainTs = fs.readFileSync(
       path.resolve(destination, "main.ts"),
@@ -279,8 +287,6 @@ This means that your Terraform state file will be stored locally on disk in a fi
       );
       execSync(`${command} run get`, runGetOptions);
     }
-
-    telemetryData.conversionStats = stats;
   }
 
   if (templateInfo.cleanupTemporaryFiles) {
@@ -293,15 +299,19 @@ This means that your Terraform state file will be stored locally on disk in a fi
     telemetryData.addedProviders = providers;
   }
 
-  await sendTelemetry("init", {
-    ...telemetryData,
-    language: cdktfConfig.language,
-  });
+  // Initialized against the new project so the init metric honours the consent
+  // persisted there.
+  await initializErrorReporting(
+    undefined,
+    undefined,
+    path.resolve(destination),
+  );
 
   return {
     needsGet,
     codeMakerOutput: cdktfConfig.codeMakerOutput,
     language: cdktfConfig.language,
+    telemetry: { ...telemetryData, language: cdktfConfig.language },
   };
 }
 

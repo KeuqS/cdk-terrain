@@ -67,12 +67,8 @@ export async function runGet({
         stream?.setBar(`${status}...`, { spinner: true });
       },
       providerSchemaCachePath,
-      reportTelemetry: async (payload) =>
-        sendTelemetry("get", {
-          language: payload.targetLanguage,
-          ...payload.trackingPayload,
-        }),
     });
+    await sendTelemetry("get", { language });
   } catch (e: any) {
     stream?.stop();
     if (!IsErrorType(e, "Usage")) {
