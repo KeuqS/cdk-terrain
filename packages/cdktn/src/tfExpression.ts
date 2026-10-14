@@ -127,7 +127,32 @@ class TFExpression extends Intrinsic implements IResolvable {
   protected escapeString(str: string) {
     return str
       .replace(/\n/g, "\\n") // escape newlines
-      .replace(/"/g, '\\"') // escape quotes in HCL string literals
+      .replace(/\${/g, "$$${"); // escape ${ to $${
+  }
+
+  protected escapeStringLiteral(str: string, preserveQuotedLiteral = false) {
+    if (preserveQuotedLiteral) {
+      return this.escapeString(str);
+    }
+
+    let escaped = "";
+
+    for (let i = 0; i < str.length; i++) {
+      const character = str[i];
+      if (character === '"') {
+        let backslashes = 0;
+        for (let j = i - 1; j >= 0 && str[j] === "\\"; j--) {
+          backslashes++;
+        }
+        if (backslashes % 2 === 0) {
+          escaped += "\\";
+        }
+      }
+      escaped += character;
+    }
+
+    return escaped
+      .replace(/\n/g, "\\n") // escape newlines
       .replace(/\${/g, "$$${"); // escape ${ to $${
   }
 
@@ -141,7 +166,7 @@ class TFExpression extends Intrinsic implements IResolvable {
         resolvedArg.startsWith('"') &&
         resolvedArg.endsWith('"')
         ? this.escapeString(resolvedArg)
-        : `"${this.escapeString(resolvedArg)}"`;
+        : `"${this.escapeStringLiteral(resolvedArg)}"`;
     }
 
     // Only a token reference
@@ -168,7 +193,7 @@ class TFExpression extends Intrinsic implements IResolvable {
 
         // if left is a string literal, then we need to escape it
         if (leftTokenList.literals.length === 1 && leftTokenCount === 0) {
-          leftValue = this.escapeString(left);
+          leftValue = this.escapeStringLiteral(left, true);
         }
 
         // if left is only a token, needs to be wrapped as terraform expression
@@ -178,7 +203,7 @@ class TFExpression extends Intrinsic implements IResolvable {
 
         const rightValue =
           rightTokens.length === 0
-            ? this.escapeString(right)
+            ? this.escapeStringLiteral(right, true)
             : `\${${rightTokens[0]}}`;
 
         return `${leftValue}${rightValue}`;
@@ -202,7 +227,7 @@ class RawString extends TFExpression {
 
   public resolve(context: IResolveContext) {
     const qts = context.suppressBraces ? `"` : ``;
-    return `${qts}${this.escapeString(this.str)}${qts}`;
+    return `${qts}${this.escapeStringLiteral(this.str)}${qts}`;
   }
 
   public toString() {
